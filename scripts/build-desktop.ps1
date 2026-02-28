@@ -11,7 +11,8 @@ if (Test-Path $devModeKey) {
   }
 }
 
-if (($allowDev -ne 1) -and ($allowTrusted -ne 1)) {
+$skipDevModeCheck = ($env:DSA_SKIP_DEVMODE_CHECK -eq 'true') -or ($env:CI -eq 'true')
+if (-not $skipDevModeCheck -and ($allowDev -ne 1) -and ($allowTrusted -ne 1)) {
   Write-Host 'Developer Mode is disabled. Enable it to allow symlink creation for electron-builder.'
   Write-Host 'Windows Settings -> Privacy & security -> For developers -> Developer Mode'
   throw 'Developer Mode required for electron-builder cache extraction.'
@@ -21,8 +22,15 @@ $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
 $env:ELECTRON_BUILDER_ALLOW_UNRESOLVED_SYMLINKS = 'true'
 $env:ELECTRON_BUILDER_CACHE = "${PSScriptRoot}\..\.electron-builder-cache"
 
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$backendArtifact = Join-Path $repoRoot 'dist\backend\stock_analysis'
+
+if (!(Test-Path $backendArtifact)) {
+  throw "Backend artifact not found: $backendArtifact. Run scripts\build-backend.ps1 first."
+}
+
 Write-Host 'Building Electron desktop app...'
-Push-Location 'apps\dsa-desktop'
+Push-Location (Join-Path $repoRoot 'apps\dsa-desktop')
 if (!(Test-Path 'node_modules')) {
   npm install
 }
@@ -45,7 +53,7 @@ if (!(Test-Path $appBuilderPath)) {
   npm install
 }
 
-npm run build
+npx electron-builder --win nsis
 if ($LASTEXITCODE -ne 0) {
   throw 'Electron build failed.'
 }
