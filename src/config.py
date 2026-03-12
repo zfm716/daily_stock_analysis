@@ -15,6 +15,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import urlparse
 from dotenv import load_dotenv, dotenv_values
 from dataclasses import dataclass, field
 
@@ -36,6 +37,24 @@ class ConfigIssue:
 
     def __str__(self) -> str:  # noqa: D105
         return self.message
+
+
+_MANAGED_LITELLM_KEY_PROVIDERS = {"gemini", "vertex_ai", "anthropic", "openai", "deepseek"}
+
+
+def _get_litellm_provider(model: str) -> str:
+    """Extract the LiteLLM provider prefix from a model string."""
+    if not model:
+        return ""
+    if "/" in model:
+        return model.split("/", 1)[0]
+    return "openai"
+
+
+def _uses_direct_env_provider(model: str) -> bool:
+    """Whether runtime handles the model via direct litellm env/provider resolution."""
+    provider = _get_litellm_provider(model)
+    return bool(provider) and provider not in _MANAGED_LITELLM_KEY_PROVIDERS
 
 
 def setup_env(override: bool = False):
@@ -87,6 +106,8 @@ class Config:
     # --- Multi-channel LLM config (new) ---
     # LITELLM_CONFIG: path to a standard litellm_config.yaml file (most powerful)
     litellm_config_path: Optional[str] = None
+    # Internal metadata: which config layer actually produced llm_model_list
+    llm_models_source: str = "legacy_env"
     # LLM_CHANNELS: list of channel dicts, each with name/base_url/api_keys/models
     llm_channels: List[Dict[str, Any]] = field(default_factory=list)
     # Pre-built LiteLLM Router model_list (populated from channels, YAML, or legacy keys)
@@ -135,6 +156,7 @@ class Config:
     tavily_api_keys: List[str] = field(default_factory=list)  # Tavily API Keys
     brave_api_keys: List[str] = field(default_factory=list)  # Brave Search API Keys
     serpapi_keys: List[str] = field(default_factory=list)  # SerpAPI Keys
+    searxng_base_urls: List[str] = field(default_factory=list)  # SearXNG instance URLs (self-hosted, no quota)
 
     # === 新闻与分析筛选配置 ===
     news_max_age_days: int = 3   # 新闻最大时效（天）
@@ -489,12 +511,15 @@ class Config:
 
         # === LLM Channels + YAML config ===
         litellm_config_path = os.getenv('LITELLM_CONFIG', '').strip() or None
+        llm_models_source = "legacy_env"
         llm_channels: List[Dict[str, Any]] = []
         llm_model_list: List[Dict[str, Any]] = []
 
         # Priority 1: LITELLM_CONFIG (standard LiteLLM YAML config file)
         if litellm_config_path:
             llm_model_list = cls._parse_litellm_yaml(litellm_config_path)
+            if llm_model_list:
+                llm_models_source = "litellm_config"
 
         # Priority 2: LLM_CHANNELS (env var based channel config)
         if not llm_model_list:
@@ -502,6 +527,8 @@ class Config:
             if _channels_str:
                 llm_channels = cls._parse_llm_channels(_channels_str)
                 llm_model_list = cls._channels_to_model_list(llm_channels)
+                if llm_model_list:
+                    llm_models_source = "llm_channels"
 
         # Priority 3: Legacy env vars → auto-build model_list (backward compatible)
         if not llm_model_list:
@@ -512,6 +539,8 @@ class Config:
                 ),
                 deepseek_api_keys,
             )
+            if llm_model_list:
+                llm_models_source = "legacy_env"
 
         # Auto-infer LITELLM_MODEL from channels when not explicitly set
         if not litellm_model and llm_channels:
@@ -547,6 +576,22 @@ class Config:
         brave_keys_str = os.getenv('BRAVE_API_KEYS', '')
         brave_api_keys = [k.strip() for k in brave_keys_str.split(',') if k.strip()]
 
+        _raw_urls = [u.strip() for u in os.getenv('SEARXNG_BASE_URLS', '').split(',') if u.strip()]
+        searxng_base_urls = []
+        invalid_searxng_urls = []
+        for u in _raw_urls:
+            p = urlparse(u)
+            if p.scheme in ('http', 'https') and p.netloc:
+                searxng_base_urls.append(u)
+            else:
+                invalid_searxng_urls.append(u)
+        if invalid_searxng_urls:
+            import logging
+            logging.getLogger(__name__).warning(
+                "SEARXNG_BASE_URLS 中存在无效 URL，已忽略: %s",
+                ", ".join(invalid_searxng_urls[:3]),
+            )
+
         # 企微消息类型与最大字节数逻辑
         wechat_msg_type = os.getenv('WECHAT_MSG_TYPE', 'markdown')
         wechat_msg_type_lower = wechat_msg_type.lower()
@@ -566,6 +611,7 @@ class Config:
             litellm_model=litellm_model,
             litellm_fallback_models=litellm_fallback_models,
             litellm_config_path=litellm_config_path,
+            llm_models_source=llm_models_source,
             llm_channels=llm_channels,
             llm_model_list=llm_model_list,
             gemini_api_keys=gemini_api_keys,
@@ -608,6 +654,7 @@ class Config:
             tavily_api_keys=tavily_api_keys,
             brave_api_keys=brave_api_keys,
             serpapi_keys=serpapi_keys,
+            searxng_base_urls=searxng_base_urls,
             news_max_age_days=max(1, int(os.getenv('NEWS_MAX_AGE_DAYS', '3'))),
             bias_threshold=max(1.0, float(os.getenv('BIAS_THRESHOLD', '5.0'))),
             agent_mode=os.getenv('AGENT_MODE', 'false').lower() == 'true',
@@ -1089,10 +1136,11 @@ class Config:
             ))
 
         # --- LLM availability ---
-        # llm_model_list is populated for ALL three config tiers (YAML / channels /
-        # legacy keys), so it is the canonical signal that at least one LLM is
-        # configured, regardless of which tier the user chose.
-        if not self.llm_model_list:
+        # llm_model_list is populated for YAML / channels / managed legacy keys.
+        # Other LiteLLM-native providers (for example cohere/*) run through the
+        # direct litellm env path and therefore do not populate llm_model_list.
+        has_direct_env_model = bool(self.litellm_model) and _uses_direct_env_provider(self.litellm_model)
+        if not self.llm_model_list and not has_direct_env_model:
             issues.append(ConfigIssue(
                 severity="error",
                 message=(
@@ -1118,10 +1166,11 @@ class Config:
             or self.tavily_api_keys
             or self.brave_api_keys
             or self.serpapi_keys
+            or self.searxng_base_urls
         ):
             issues.append(ConfigIssue(
                 severity="info",
-                message="未配置搜索引擎 API Key (Bocha/MiniMax/Tavily/Brave/SerpAPI)，新闻搜索功能将不可用",
+                message="未配置搜索引擎 API Key (Bocha/MiniMax/Tavily/Brave/SerpAPI/SearXNG)，新闻搜索功能将不可用",
                 field="BOCHA_API_KEY",
             ))
 
@@ -1245,13 +1294,14 @@ def get_api_keys_for_model(model: str, config: Config) -> List[str]:
     selection, so this function is not needed.  Kept for backward compat when
     no Router is built and a direct litellm.completion() call is needed.
     """
-    if model.startswith("gemini/") or model.startswith("vertex_ai/"):
+    provider = _get_litellm_provider(model)
+    if provider in {"gemini", "vertex_ai"}:
         return [k for k in config.gemini_api_keys if k and len(k) >= 8]
-    if model.startswith("anthropic/"):
+    if provider == "anthropic":
         return [k for k in config.anthropic_api_keys if k and len(k) >= 8]
-    if model.startswith("deepseek/"):
+    if provider == "deepseek":
         return [k for k in config.deepseek_api_keys if k and len(k) >= 8]
-    if model.startswith("openai/") or "/" not in model:
+    if provider == "openai":
         return [k for k in config.openai_api_keys if k and len(k) >= 8]
     # Other LiteLLM-native providers – API key resolved from env vars
     return []
