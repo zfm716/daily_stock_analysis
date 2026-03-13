@@ -33,6 +33,7 @@
 | AI | 决策仪表盘 | 一句话核心结论 + 精确买卖点位 + 操作检查清单 |
 | 分析 | 多维度分析 | 技术面（盘中实时 MA/多头排列）+ 筹码分布 + 舆情情报 + 实时行情 |
 | 市场 | 全球市场 | 支持 A股、港股、美股及美股指数（SPX、DJI、IXIC 等） |
+| 基本面 | 结构化聚合 | 新增 `fundamental_context`（valuation/growth/earnings/institution/capital_flow/dragon_tiger/boards，其中 `boards` 表示板块涨跌榜），主链路 fail-open 降级 |
 | 策略 | 市场策略系统 | 内置 A股「三段式复盘策略」与美股「Regime Strategy」，输出进攻/均衡/防守或 risk-on/neutral/risk-off 计划，并附“仅供参考，不构成投资建议”提示 |
 | 复盘 | 大盘复盘 | 每日市场概览、板块涨跌；支持 cn(A股)/us(美股)/both(两者) 切换 |
 | 智能导入 | 多源导入 | 支持图片、CSV/Excel 文件、剪贴板粘贴；Vision LLM 提取代码+名称；置信度分层确认；名称→代码解析（本地+拼音+AkShare） |
@@ -81,6 +82,8 @@
 **AI 模型配置（至少配置一个）**
 
 > 详细配置说明见 [LLM 配置指南](docs/LLM_CONFIG_GUIDE.md)（三层配置、渠道模式、YAML高级配置、Vision、Agent、排错），GitHub Actions用户也可以实现YAML高级配置。进阶用户可配置 `LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS` 或 `LLM_CHANNELS` 多渠道模式。
+
+> 现在推荐把多模型配置统一写成 `LLM_CHANNELS + LLM_<NAME>_PROTOCOL/BASE_URL/API_KEY/MODELS/ENABLED`。Web 设置页和 `.env` 使用同一套字段，便于相互切换。
 
 > 💡 **推荐 [AIHubMix](https://aihubmix.com/?aff=CfMq)**：一个 Key 即可使用 Gemini、GPT、Claude、DeepSeek 等全球主流模型，无需科学上网，含免费模型（glm-5、gpt-4o-free 等），付费模型高稳定性无限并发。本项目可享 **10% 充值优惠**。
 
@@ -159,6 +162,23 @@
 | `AGENT_STRATEGY_DIR` | 自定义策略目录（默认内置 `strategies/`） | 可选 |
 | `TRADING_DAY_CHECK_ENABLED` | 交易日检查（默认 `true`）：非交易日跳过执行；设为 `false` 或使用 `--force-run` 强制执行 | 可选 |
 | `ENABLE_CHIP_DISTRIBUTION` | 启用筹码分布（Actions 默认 false；需筹码数据时在 Variables 中设为 true，接口可能不稳定） | 可选 |
+| `ENABLE_FUNDAMENTAL_PIPELINE` | 基本面聚合总开关；关闭时保持主流程不变 | 可选 |
+| `FUNDAMENTAL_STAGE_TIMEOUT_SECONDS` | 基本面阶段总预算（秒） | 可选 |
+| `FUNDAMENTAL_FETCH_TIMEOUT_SECONDS` | 单能力源调用超时（秒） | 可选 |
+| `FUNDAMENTAL_RETRY_MAX` | 基本面能力重试次数（包含首次） | 可选 |
+| `FUNDAMENTAL_CACHE_TTL_SECONDS` | 基本面缓存 TTL（秒） | 可选 |
+| `FUNDAMENTAL_CACHE_MAX_ENTRIES` | 基本面缓存最大条目数（避免长时间运行内存增长） | 可选 |
+
+> 基本面超时语义（P0）：
+> - 当前采用 `best-effort` 软超时（fail-open），超时会立即降级并继续主流程；
+> - 不承诺严格硬中断第三方调用线程，因此 `P95 <= 1.5s` 是阶段目标而非硬 SLA；
+> - 若业务需要硬 SLA，可在后续阶段升级为“子进程隔离 + kill”的硬超时方案。
+> - 字段契约：
+>   - `fundamental_context.boards.data` = `sector_rankings`（板块涨跌榜，结构 `{top, bottom}`）；
+>   - `get_stock_info.belong_boards` = 个股所属板块列表；
+>   - `get_stock_info.boards` 为兼容别名，值与 `belong_boards` 相同（未来仅在大版本考虑移除）；
+>   - `get_stock_info.sector_rankings` 与 `fundamental_context.boards.data` 保持一致。
+> - 板块涨跌榜采用固定回退顺序：`AkShare(EM->Sina) -> Tushare -> efinance`。
 
 #### 3. 启用 Actions
 
@@ -196,6 +216,21 @@ cp .env.example .env && vim .env
 # 运行分析
 python main.py
 ```
+
+如果你不用 Web，推荐直接在 `.env` 里按条写渠道：
+
+```env
+LLM_CHANNELS=primary
+LLM_PRIMARY_PROTOCOL=openai
+LLM_PRIMARY_BASE_URL=https://api.deepseek.com/v1
+LLM_PRIMARY_API_KEY=sk-xxxxxxxx
+LLM_PRIMARY_MODELS=deepseek-chat
+LITELLM_MODEL=openai/deepseek-chat
+```
+
+保存后也可以在 Web 设置页继续编辑同一组字段；不会要求额外配置文件。
+
+如果同时启用了 `LITELLM_CONFIG`，YAML 仍然是运行时主模型 / fallback / Vision 的唯一来源；渠道编辑器只保存渠道条目，不会覆盖 YAML 的运行时选择。
 
 > Docker 部署、定时任务配置请参考 [完整指南](docs/full-guide.md)
 > 桌面客户端打包请参考 [桌面端打包说明](docs/desktop-package.md)
