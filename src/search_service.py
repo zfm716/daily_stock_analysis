@@ -32,6 +32,7 @@ from tenacity import (
     before_sleep_log,
 )
 
+from data_provider.base import normalize_stock_code, _is_f_fund_code
 from data_provider.us_index_mapping import is_us_index_code
 from src.config import (
     NEWS_STRATEGY_WINDOWS,
@@ -2123,6 +2124,15 @@ class SearchService:
         "{name} technical analysis",
         "{name} {code} performance volume",
     ]
+    # 增强搜索关键词模板（场外基金）
+    ENHANCED_SEARCH_KEYWORDS_FUND = [
+        "{name} 基金 今日 净值",
+        "{name} {code} 净值 走势",
+        "{name} 基金 经理 变动",
+        "{name} 基金 持仓 变动",
+        "{name} {code} 业绩 排名",
+    ]
+
     NEWS_OVERSAMPLE_FACTOR = 2
     NEWS_OVERSAMPLE_MAX = 10
     FUTURE_TOLERANCE_DAYS = 1
@@ -2487,6 +2497,9 @@ class SearchService:
         code = (stock_code or '').strip().split('.')[0]
         if not code:
             return False
+        # 场外基金 (F 前缀)
+        if _is_f_fund_code(code):
+            return True
         # A-share ETF
         if code.isdigit() and len(code) == 6 and code.startswith(SearchService._A_ETF_PREFIXES):
             return True
@@ -3581,19 +3594,8 @@ class SearchService:
         focus_keywords: Optional[List[str]] = None
     ) -> SearchResponse:
         """
-        搜索股票相关新闻
-        
-        Args:
-            stock_code: 股票代码
-            stock_name: 股票名称
-            max_results: 最大返回结果数
-            focus_keywords: 重点关注的关键词列表
-            
-        Returns:
-            SearchResponse 对象
+        搜索股票或基金相关新闻/公告
         """
-        # 策略窗口优先：ultra_short/short/medium/long = 1/3/7/30 天，
-        # 并统一受 NEWS_MAX_AGE_DAYS 上限约束。
         search_days = self._effective_news_window_days()
         provider_max_results = self._provider_request_size(max_results)
         prefer_chinese = self._should_prefer_chinese_news(
@@ -3602,19 +3604,22 @@ class SearchService:
             focus_keywords=focus_keywords,
         )
 
-        # 构建搜索查询（优化搜索效果）
-        is_foreign = self._is_foreign_stock(stock_code)
+        is_fund = _is_f_fund_code(stock_code)
+        
+        # 构建搜索查询
         if focus_keywords:
-            # 如果提供了关键词，直接使用关键词作为查询
             query = " ".join(focus_keywords)
-        elif prefer_chinese:
-            query = f"{stock_name} {stock_code} 股票 最新消息"
-        elif is_foreign:
-            # 港股/美股使用英文搜索关键词
-            query = f"{stock_name} {stock_code} stock latest news"
+        elif is_fund:
+            # 场外基金使用垂直领域关键词
+            query = f"site:(eastmoney.com OR howbuy.com OR sina.com.cn OR jrj.com.cn) {stock_name} {stock_code} 基金 净值 公告"
         else:
-            # 默认主查询：股票名称 + 核心关键词
-            query = f"{stock_name} {stock_code} 股票 最新消息"
+            is_foreign = self._is_foreign_stock(stock_code)
+            if prefer_chinese:
+                query = f"{stock_name} {stock_code} 股票 最新消息"
+            elif is_foreign:
+                query = f"{stock_name} {stock_code} stock latest news"
+            else:
+                query = f"{stock_name} {stock_code} 股票 最新消息"
 
         logger.info(
             (
@@ -4056,11 +4061,15 @@ class SearchService:
         target_per_dimension = 3
         provider_max_results = self._provider_request_size(target_per_dimension)
 
+        is_fund = _is_f_fund_code(stock_code)
+        target_label = "基金" if is_fund else "股票"
+
         logger.info(
             (
-                "开始多维度情报搜索: %s(%s), 时间范围: 近%s天 "
+                "开始多维度情报搜索: %s%s(%s), 时间范围: 近%s天 "
                 "(profile=%s, NEWS_MAX_AGE_DAYS=%s), 目标条数=%s, provider请求条数=%s"
             ),
+            target_label,
             stock_name,
             stock_code,
             search_days,
@@ -4262,28 +4271,10 @@ class SearchService:
     ) -> SearchResponse:
         """
         Enhance search when data sources fail.
-        
-        When all data sources (efinance, akshare, tushare, baostock, etc.) fail to get
-        stock data, use search engines to find stock trends and price info as supplemental data for AI analysis.
-        
-        Strategy:
-        1. Search using multiple keyword templates
-        2. Try all available search engines for each keyword
-        3. Aggregate and deduplicate results
-        
-        Args:
-            stock_code: Stock Code
-            stock_name: Stock Name
-            max_attempts: Max search attempts (using different keywords)
-            max_results: Max results to return
-            
-        Returns:
-            SearchResponse object with aggregated results
         """
-
         if not self.is_available:
             return SearchResponse(
-                query=f"{stock_name} 股价走势",
+                query=f"{stock_name} 走势",
                 results=[],
                 provider="None",
                 success=False,
@@ -4296,15 +4287,24 @@ class SearchService:
         seen_urls = set()
         successful_providers = []
         
-        # 使用多个关键词模板搜索
-        is_foreign = self._is_foreign_stock(stock_code)
-        keywords = self.ENHANCED_SEARCH_KEYWORDS_EN if is_foreign else self.ENHANCED_SEARCH_KEYWORDS
+        # 确定关键词模板
+        is_fund = _is_f_fund_code(stock_code)
+        if is_fund:
+            keywords = self.ENHANCED_SEARCH_KEYWORDS_FUND
+        else:
+            is_foreign = self._is_foreign_stock(stock_code)
+            keywords = self.ENHANCED_SEARCH_KEYWORDS_EN if is_foreign else self.ENHANCED_SEARCH_KEYWORDS
+
         for i, keyword_template in enumerate(keywords[:max_attempts]):
             query = keyword_template.format(name=stock_name, code=stock_code)
+            # 对于基金，同样限制搜索域以提高质量
+            if is_fund:
+                query = f"site:(eastmoney.com OR howbuy.com OR sina.com.cn) {query}"
             
             logger.info(f"[增强搜索] 第 {i+1}/{max_attempts} 次搜索: {query}")
             
             # 依次尝试各个搜索引擎
+            # ... (rest of the logic)
             for provider in self._providers:
                 if not provider.is_available:
                     continue

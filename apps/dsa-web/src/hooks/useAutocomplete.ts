@@ -4,10 +4,12 @@
  * Manage autocomplete interaction logic
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { StockIndexItem, StockSuggestion } from '../types/stockIndex';
 import { searchStocks } from '../utils/searchStocks';
 import { SEARCH_CONFIG } from '../utils/stockIndexFields';
+
+export type AssetFilter = 'all' | 'stock' | 'fund';
 
 export interface UseAutocompleteOptions {
   /** Minimum query length */
@@ -16,6 +18,8 @@ export interface UseAutocompleteOptions {
   debounceMs?: number;
   /** Limit on number of results to return */
   limit?: number;
+  /** Asset filter */
+  assetFilter?: AssetFilter;
 }
 
 export interface UseAutocompleteResult {
@@ -66,6 +70,7 @@ export function useAutocomplete(
     minLength = SEARCH_CONFIG.MIN_QUERY_LENGTH,
     debounceMs = SEARCH_CONFIG.DEBOUNCE_MS,
     limit = SEARCH_CONFIG.DEFAULT_LIMIT,
+    assetFilter = 'all',
   } = options;
 
   const [query, setQuery] = useState('');
@@ -75,6 +80,12 @@ export function useAutocomplete(
   const [isComposing, setIsComposing] = useState(false);
   const [runtimeFallback, setRuntimeFallback] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+
+  // Filter index based on assetFilter
+  const filteredIndex = useMemo(() => {
+    if (assetFilter === 'all') return index;
+    return index.filter(item => item.assetType === assetFilter);
+  }, [index, assetFilter]);
 
   // Use ref to store debounce timer
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -93,7 +104,7 @@ export function useAutocomplete(
     }
 
     try {
-      const results = searchStocks(q, index, { limit });
+      const results = searchStocks(q, filteredIndex, { limit });
       setSuggestions(results);
       setIsOpen(results.length > 0);
       setHighlightedIndex(-1);
@@ -106,7 +117,7 @@ export function useAutocomplete(
       setIsOpen(false);
       setHighlightedIndex(-1);
     }
-  }, [index, minLength, limit, runtimeFallback]);
+  }, [filteredIndex, minLength, limit, runtimeFallback]);
 
   // Input handling (with debounce)
   const handleInputChange = useCallback((value: string) => {
@@ -126,6 +137,13 @@ export function useAutocomplete(
       search(value);
     }, debounceMs);
   }, [search, debounceMs, runtimeFallback]);
+
+  // Re-run search when assetFilter changes if there's a query
+  useEffect(() => {
+    if (query && !isComposing) {
+      search(query);
+    }
+  }, [assetFilter, search, query, isComposing]);
 
   // Select suggestion item
   const handleSelect = useCallback((suggestion: StockSuggestion) => {

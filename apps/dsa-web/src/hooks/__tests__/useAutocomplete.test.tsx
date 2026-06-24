@@ -66,6 +66,7 @@ describe('useAutocomplete', () => {
         displayCode: '600519',
         nameZh: '贵州茅台',
         market: 'CN',
+        assetType: 'stock',
         matchType: 'exact',
         matchField: 'code',
         score: 100,

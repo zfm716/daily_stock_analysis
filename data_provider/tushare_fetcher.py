@@ -377,8 +377,15 @@ class TushareFetcher(BaseFetcher):
             #raise DataFetchError(f"TushareFetcher 不支持港股 {raw_code}，请使用 AkshareFetcher")
             return normalize_stock_code(raw_code)
 
+        # Normalize code and detect exchange hint
         code = normalize_stock_code(raw_code)
-        exchange_hint = self._detect_exchange_hint(raw_code)
+        # Handle fund codes prefixed with 'F'
+        if raw_code.upper().startswith('F'):
+            # Strip leading 'F' and normalize remaining digits
+            code = normalize_stock_code(raw_code[1:])
+            exchange_hint = None
+        else:
+            exchange_hint = self._detect_exchange_hint(raw_code)
 
         if exchange_hint == "SH":
             return f"{code}.SH"
@@ -577,6 +584,12 @@ class TushareFetcher(BaseFetcher):
         """
         if self._api is None:
             logger.warning("Tushare API 未初始化，无法获取股票名称")
+            return None
+
+        # F 开头场外基金不在 Tushare stock_basic / fund_basic 收录范围内，
+        # 直接短路交给 `AkshareFetcher.get_stock_name` 处理，避免浪费
+        # stock_basic 1 次/分钟的限流配额。
+        if (stock_code or "").strip().upper().startswith("F"):
             return None
 
         # 检查缓存

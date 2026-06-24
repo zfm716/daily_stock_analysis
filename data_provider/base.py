@@ -87,9 +87,12 @@ def normalize_stock_code(stock_code: str) -> str:
     - '7203.T'      -> '7203.T'   (keep Japan Yahoo suffix form)
     - '005930.KS'   -> '005930.KS' (keep Korea Yahoo suffix form)
     - 'AAPL'        -> 'AAPL'     (keep US stock ticker as-is)
+    - 'F161725'     -> 'F161725'  (keep leading F to distinguish off-exchange funds)
+    - 'f161725'     -> 'F161725'  (case-insensitive F preservation)
 
-    This function is applied at the DataProviderManager layer so that
-    all individual fetchers receive a clean 6-digit code (for A-shares/ETFs).
+    This function is applied at the DataProviderManager layer. Fetchers that
+    do not support F-prefixed codes should strip it locally or be bypassed
+    via routing logic.
     """
     code = stock_code.strip()
     upper = code.upper()
@@ -99,6 +102,13 @@ def normalize_stock_code(stock_code: str) -> str:
         candidate = upper[2:]
         if candidate.isdigit() and 1 <= len(candidate) <= 5:
             return f"HK{candidate.zfill(5)}"
+
+    # Keep leading 'F' for off-exchange (场外) fund codes (e.g. f161725 -> F161725).
+    # This allows routing to fund-aware fetchers and prevents collision with stocks.
+    if upper.startswith('F') and len(upper) > 1:
+        candidate = upper[1:]
+        if candidate.isdigit() and len(candidate) in (5, 6):
+            return upper
 
     # Strip SH/SZ prefix (e.g. SH600519 -> 600519)
     if upper.startswith(('SH', 'SZ')) and not upper.startswith('SH.') and not upper.startswith('SZ.'):
@@ -188,6 +198,12 @@ def _is_kr_market(code: str) -> bool:
         return False
     base = normalized.rsplit(".", 1)[0]
     return base.isdigit() and len(base) == 6
+
+
+def _is_f_fund_code(code: str) -> bool:
+    """Check if the code is an off-exchange open-ended fund code (F-prefix)."""
+    normalized = normalize_stock_code(code)
+    return normalized.startswith("F") and len(normalized) > 1 and normalized[1:].isdigit()
 
 
 def _is_etf_code(code: str) -> bool:
@@ -1238,19 +1254,31 @@ class DataFetcherManager:
         errors = []
         request_start = time.time()
 
-        # 快速路径：美股使用专用数据源路由；港股先过滤不支持港股日线的数据源
-        #   - 配置长桥凭据后: Longbridge 为首选, YFinance/AkShare 兜底
-        #   - 未配置长桥:     YFinance 为首选（美股）, 通用 fetcher 循环（港股）
-        #   - 美股指数:       始终 YFinance 为首选（Longbridge 不提供指数K线）
-        is_us_index = is_us_index_code(stock_code)
-        is_us = is_us_index or is_us_stock_code(stock_code)
-        is_hk = (not is_us) and _is_hk_market(stock_code)
-        is_jp = (not is_us) and (not is_hk) and _is_jp_market(stock_code)
-        is_kr = (not is_us) and (not is_hk) and _is_kr_market(stock_code)
-        market = "us" if is_us else "hk" if is_hk else "jp" if is_jp else "kr" if is_kr else "cn"
-        if market != "cn":
-            fetchers = self._filter_daily_fetchers_for_market(fetchers, market)
-        fetchers = self._filter_fetchers_by_capability(fetchers, capability="daily_data")
+        # 场外基金（F 前缀）专用路由
+        is_f_fund = _is_f_fund_code(stock_code)
+        is_us_index = False
+        is_us = False
+        is_hk = False
+        
+        if is_f_fund:
+            fetchers = [f for f in fetchers if getattr(f, "handles_fund_codes", False)]
+            if not fetchers:
+                raise DataFetchError(f"场外基金 {stock_code} 获取失败: 暂无支持基金数据的数据源")
+            market = "cn"
+        else:
+            # 快速路径：美股使用专用数据源路由；港股先过滤不支持港股日线的数据源
+            #   - 配置长桥凭据后: Longbridge 为首选, YFinance/AkShare 兜底
+            #   - 未配置长桥:     YFinance 为首选（美股）, 通用 fetcher 循环（港股）
+            #   - 美股指数:       始终 YFinance 为首选（Longbridge 不提供指数K线）
+            is_us_index = is_us_index_code(stock_code)
+            is_us = is_us_index or is_us_stock_code(stock_code)
+            is_hk = (not is_us) and _is_hk_market(stock_code)
+            is_jp = (not is_us) and (not is_hk) and _is_jp_market(stock_code)
+            is_kr = (not is_us) and (not is_hk) and _is_kr_market(stock_code)
+            market = "us" if is_us else "hk" if is_hk else "jp" if is_jp else "kr" if is_kr else "cn"
+            if market != "cn":
+                fetchers = self._filter_daily_fetchers_for_market(fetchers, market)
+            fetchers = self._filter_fetchers_by_capability(fetchers, capability="daily_data")
         total_fetchers = len(fetchers)
 
         if total_fetchers == 0:
@@ -1673,10 +1701,31 @@ class DataFetcherManager:
             return None
 
         # ----------------------------------------------------------
+        # 场外基金 (F前缀) 专用路由
+        # ----------------------------------------------------------
+        is_f_fund = _is_f_fund_code(stock_code)
+        if is_f_fund:
+            # 场外基金实时行情（净值）目前主要由 AkshareFetcher 提供
+            fetcher = self._get_fetcher_by_name("AkshareFetcher", capability="realtime_quote")
+            if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
+                record_provider_run_started(
+                    data_type="realtime_quote",
+                    provider=fetcher.name,
+                    operation="get_realtime_quote",
+                )
+                quote = self._call_fetcher_method(fetcher, 'get_realtime_quote', stock_code, source="em")
+                if quote is not None:
+                    logger.info(f"[实时行情] 场外基金 {stock_code} 成功获取 (来源: AkshareFetcher)")
+                    return self._enrich_realtime_quote(
+                        quote,
+                        realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                    )
+            if log_final_failure:
+                logger.info(f"[实时行情] 场外基金 {stock_code} 无可用数据源")
+            return None
+
+        # ----------------------------------------------------------
         # 美股 (指数 + 个股) / 港股 — 专用双源路由
-        #   配置长桥后: Longbridge 首选, YFinance/AkShare 补充
-        #   未配置长桥: YFinance/AkShare 首选, Longbridge 补充
-        #   美股指数:   始终 YFinance 首选（Longbridge 不提供指数行情）
         # ----------------------------------------------------------
         is_us_index = is_us_index_code(stock_code)
         is_us = is_us_index or _is_us_code(stock_code)
@@ -2139,23 +2188,35 @@ class DataFetcherManager:
     def get_stock_name(self, stock_code: str, allow_realtime: bool = True) -> Optional[str]:
         """
         获取股票中文名称（自动切换数据源）
-        
+
         尝试从多个数据源获取股票名称：
         1. 先从内存缓存中获取（如果有）
         2. 再尝试本地维护映射与 stocks.index.json 索引
         3. 然后按需查询实时行情
         4. 依次尝试各个数据源的 get_stock_name 方法
-        
+
+        F-prefixed off-exchange fund codes (e.g. ``F002611`` → 博时黄金ETF联接C)
+        take a dedicated path because their bare 6-digit form (``002611``)
+        also identifies an A-share stock (东方精工) and would otherwise be
+        misrouted into the stock resolution chain.
+
         Args:
             stock_code: 股票代码
             allow_realtime: Whether to query realtime quote first. Set False when
                 caller only wants lightweight prefetch without triggering heavy
                 realtime source calls.
-            
+
         Returns:
             股票中文名称，所有数据源都失败则返回 None
         """
         raw_stock_code = (stock_code or "").strip()
+
+        # F 开头代码走专用路径：缓存用原码做 key、跳过 realtime/静态映射/指数表、
+        # 只让声明 handles_fund_codes=True 的 fetcher 接手，避免被 A 股 002611
+        # 东方精工之类的同名代码污染命名空间。
+        if raw_stock_code.upper().startswith("F"):
+            return self._get_stock_name_for_fund(raw_stock_code)
+
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
         static_name = STOCK_NAME_MAP.get(stock_code)
@@ -2204,6 +2265,40 @@ class DataFetcherManager:
 
         # 4. 所有数据源都失败
         logger.warning(f"[股票名称] 所有数据源都无法获取 {stock_code} 的名称")
+        return ""
+
+    def _get_stock_name_for_fund(self, raw_fund_code: str) -> str:
+        """Resolve Chinese name for an F-prefixed off-exchange fund code.
+
+        The raw F-prefixed form is used as the cache key, which prevents
+        collision with the regular A-share stock that shares the same
+        6-digit body (e.g. ``F002611`` vs ``002611``). The realtime quote
+        source and the static/index name tables are bypassed because they
+        only know stocks. Only fetchers that opt in via
+        ``handles_fund_codes = True`` are consulted.
+        """
+        cached_name = self._get_cached_stock_name(raw_fund_code)
+        if cached_name is not None:
+            return cached_name
+
+        for fetcher in self._get_fetchers_snapshot():
+            if not getattr(fetcher, "handles_fund_codes", False):
+                continue
+            if not hasattr(fetcher, "get_stock_name"):
+                continue
+            if not self._is_fetcher_available(fetcher, capability="stock_name"):
+                continue
+            try:
+                name = self._call_fetcher_method(fetcher, "get_stock_name", raw_fund_code)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[股票名称] {fetcher.name} 获取 {raw_fund_code} 失败: {exc}")
+                continue
+            if is_meaningful_stock_name(name, raw_fund_code):
+                self._cache_stock_name(raw_fund_code, name)
+                logger.info(f"[股票名称] 从 {fetcher.name} 获取: {raw_fund_code} -> {name}")
+                return name
+
+        logger.warning(f"[股票名称] F 代码 {raw_fund_code} 没有可用 fetcher 命中")
         return ""
 
     def get_belong_boards(self, stock_code: str) -> List[Dict[str, Any]]:

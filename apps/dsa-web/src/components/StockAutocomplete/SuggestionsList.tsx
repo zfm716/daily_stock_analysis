@@ -57,7 +57,17 @@ export function SuggestionsList({
           onMouseEnter={() => onMouseEnter(index)}
         >
           <div className="flex items-center gap-3">
-            <MarketBadge market={suggestion.market} />
+            {suggestion.assetType === 'fund' ? (
+              <Badge
+                variant="default"
+                size="sm"
+                className={cn('min-w-[3rem] justify-center shadow-none', ASSET_TYPE_BADGE_CONFIG.fund.className)}
+              >
+                {ASSET_TYPE_BADGE_CONFIG.fund.label}
+              </Badge>
+            ) : (
+              <MarketBadge market={suggestion.market} />
+            )}
 
             <div className="flex flex-col">
               <span className="text-sm font-medium text-primary-text">
@@ -75,6 +85,10 @@ export function SuggestionsList({
     </ul>
   );
 }
+
+const ASSET_TYPE_BADGE_CONFIG = {
+  fund: { label: '基金', className: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-500' },
+} as const;
 
 const MARKET_BADGE_CONFIG = {
   CN: { label: 'A股', className: 'border-danger/25 bg-danger/10 text-danger' },

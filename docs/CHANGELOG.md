@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `main.py --serve-only` 在低配主机上因 uvicorn 在 3.0s 启动自检窗口内才惰性 import 应用（litellm + 整个 app 树）导致超时退出、容器反复重启；改为在计时前于调用线程预先 import app 对象再交给 uvicorn，启动自检不再误杀慢启动。
 - [修复] Docker 镜像预置 efinance 缓存目录（efinance/data）属主给非 root 运行用户 dsa，修复 A 股 efinance 数据源因写 search-cache.json 触发 PermissionError 而每次抓取失败降级的问题。
 - [修复] Docker 部署中 Web 设置页保存自定义 Webhook 模板时自动转义 `$content_json` 等应用占位符，并在运行时还原，避免 Compose 重新部署将其展开为空。
+- [修复] 修复 F 开头的场外基金代码（如 F161725）经 `normalize_stock_code` 清洗后仍带 F 前缀，导致 akshare/efinance/tencent 等数据源按裸代码查不到而失败的问题。
+- [新功能] `AkshareFetcher` 新增 `get_stock_name`，支持通过东方财富全量基金列表 (`ak.fund_name_em`) 缓存 + 雪球单只详情 (`ak.fund_individual_basic_info_xq`) 兜底解析 F 开头场外基金代码对应的中文简称。
+- [修复] `TushareFetcher.get_stock_name` 在收到 F 开头场外基金代码时直接短路返回 `None`，避免错误路由到 `stock_basic` 浪费其 1 次/分钟的限流配额（此前会持续产生"频率超限(1次/分钟)"警告），让 `DataFetcherManager` 顺利链式 fallback 到 `AkshareFetcher`。
+- [修复] `DataFetcherManager.get_stock_name` 在收到 F 开头场外基金代码时走专用路径 `_get_stock_name_for_fund`：缓存 key 用 F 原码（避免与同名 A 股代码的缓存相互污染，例如 `F002611` 不会被同一缓存里的 `002611` → 东方精工 覆盖）、跳过 realtime 行情和静态映射/指数表、只调用声明 `handles_fund_codes=True` 的 fetcher。修好此前 `F002611` 被误识别为 `002611` 东方精工的根本原因。
+- [新功能] `AkshareFetcher` 声明 `handles_fund_codes = True`，与 `DataFetcherManager.get_stock_name` 配合作为 F 开头场外基金代码的解析入口。
 
 ## [3.23.0] - 2026-06-20
 

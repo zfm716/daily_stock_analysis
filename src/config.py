@@ -1276,7 +1276,20 @@ class Config:
                 inferred_legacy_deepseek_model = True
             elif openai_api_keys:
                 # For openai-compatible models, add prefix only if not already prefixed
-                if '/' not in _openai_model_name:
+                # with a known LiteLLM provider.
+                known_providers = {
+                    'openai', 'anthropic', 'google', 'vertex_ai', 'azure', 'hf', 
+                    'ollama', 'vllm', 'cohere', 'replicate', 'together_ai', 
+                    'mistral', 'claude', 'deepseek', 'groq', 'openrouter', 'modelscope'
+                }
+                
+                has_provider = False
+                if '/' in _openai_model_name:
+                    prefix = _openai_model_name.split('/')[0].lower()
+                    if prefix in known_providers:
+                        has_provider = True
+                
+                if not has_provider:
                     litellm_model = f'openai/{_openai_model_name}'
                 else:
                     litellm_model = _openai_model_name

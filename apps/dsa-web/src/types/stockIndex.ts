@@ -5,7 +5,7 @@
  */
 
 export type Market = 'CN' | 'HK' | 'US' | 'JP' | 'KR' | 'INDEX' | 'ETF' | 'BSE';
-export type AssetType = 'stock' | 'index' | 'etf';
+export type AssetType = 'stock' | 'index' | 'fund';
 
 /**
  * Stock index item (full format)
@@ -47,6 +47,8 @@ export interface StockSuggestion {
   nameZh: string;
   /** Market */
   market: Market;
+  /** Asset type */
+  assetType: AssetType;
   /** Match type */
   matchType: 'exact' | 'prefix' | 'contains' | 'fuzzy';
   /** Match field */

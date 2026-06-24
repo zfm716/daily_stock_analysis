@@ -7,6 +7,7 @@ interface ValidationResult {
 const SUPPORTED_QUERY_CHARACTERS = /^[A-Z0-9.\u3400-\u9FFF\s]+$/;
 
 const STOCK_CODE_PATTERNS = [
+  /^F\d{5,6}$/, // Fund code with leading F (e.g., F002611)
   /^\d{6}$/, // A-share 6-digit code
   /^(SH|SZ|BJ)\d{6}$/, // A-share code with exchange prefix
   /^\d{6}\.(SH|SZ|SS|BJ)$/, // A-share code with exchange suffix

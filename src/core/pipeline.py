@@ -407,6 +407,7 @@ class StockAnalysisPipeline:
             daily_market_context = self._load_daily_market_context(
                 market,
                 target_date=daily_market_target_date,
+                allow_generate=False,  # Analyze stock should NOT trigger a new market review generation
             )
 
             self._emit_progress(18, f"{code}：正在获取行情与筹码数据")
@@ -1544,6 +1545,7 @@ class StockAnalysisPipeline:
         *,
         force_refresh: bool = False,
         target_date: Optional[date] = None,
+        allow_generate: bool = True,
     ) -> Optional[DailyMarketContext]:
         """Load/generate today's market context when market review is explicitly enabled."""
         if getattr(self, "daily_market_context_enabled", True) is not True:
@@ -1569,7 +1571,7 @@ class StockAnalysisPipeline:
                 "analyzer": self.analyzer,
                 "search_service": self.search_service,
                 "force_refresh": force_refresh,
-                "allow_generate": getattr(self, "daily_market_context_allow_generate", True),
+                "allow_generate": allow_generate,
                 "target_date": target_date,
             }
             current_query_id = getattr(self, "query_id", None)

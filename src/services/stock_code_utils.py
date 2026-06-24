@@ -69,6 +69,9 @@ def is_code_like(value: str) -> bool:
     text = value.strip().upper()
     if not text:
         return False
+    # Support leading 'F' for fund codes (e.g., F002611)
+    if text.startswith('F') and text[1:].isdigit() and len(text[1:]) in (5, 6):
+        return True
     if text.isdigit() and len(text) in (5, 6):
         return True
     if _strip_exchange_suffix(text) is not None:
@@ -89,10 +92,14 @@ def normalize_code(raw: str) -> Optional[str]:
     - Suffix format: 600519.SH, 600519.SZ, 920493.BJ, 00700.HK
     - Prefix format: SH600519, SZ000001, BJ920493, HK00700 (case-insensitive)
     - US ticker symbols: AAPL, TSLA
+    - Fund codes with leading 'F' (e.g., F002611) – treated as plain digits after stripping.
     """
     text = raw.strip().upper()
     if not text:
         return None
+    # Handle leading 'F' for fund codes
+    if text.startswith('F') and text[1:].isdigit() and len(text[1:]) in (5, 6):
+        return text[1:]
     if text.isdigit() and len(text) in (5, 6):
         return text
     if any(text.endswith(suffix) for suffix in _PRESERVE_SUFFIXES):

@@ -133,9 +133,12 @@ def get_market_for_stock(code: str) -> Optional[str]:
         base = code.rsplit(".", 1)[0]
         if base.isdigit() and len(base) == 6:
             return "kr"
-    # A-share: 6-digit numeric
+    # A-share or Off-exchange Fund: 6-digit numeric or F-prefix
     if code.isdigit() and len(code) == 6:
         return "cn"
+    if code.startswith("F") and len(code) > 1 and code[1:].isdigit():
+        return "cn"
+
     return None
 
 

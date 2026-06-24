@@ -75,7 +75,8 @@ def _write_watchlist_codes(service: SystemConfigService, codes: list) -> None:
 
 # Stock code validation patterns (aligned with frontend validateStockCode)
 _STOCK_CODE_RE = re.compile(
-    r"^(?:\d{6}"                              # A-share 6-digit
+    r"^(?:F\d{5,6}"                           # Fund code with leading F
+    r"|\d{6}"                                 # A-share 6-digit
     r"|(?:SH|SZ|BJ)\d{6}"                     # exchange-prefixed A-share
     r"|\d{6}\.(?:SH|SZ|SS|BJ)"                # exchange-suffixed A-share
     r"|\d{1,5}\.HK"                           # HK suffix format

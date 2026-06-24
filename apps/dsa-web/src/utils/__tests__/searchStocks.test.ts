@@ -115,6 +115,18 @@ const mockIndex: StockIndexItem[] = [
     active: false,  // Inactive
     popularity: 80,
   },
+  {
+    canonicalCode: "510300.SH",
+    displayCode: "510300",
+    nameZh: "沪深300ETF",
+    pinyinFull: "hushen300etf",
+    pinyinAbbr: "hs300etf",
+    aliases: ["300ETF"],
+    market: "ETF",
+    assetType: "fund",
+    active: true,
+    popularity: 95,
+  },
 ];
 
 describe('searchStocks', () => {

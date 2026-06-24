@@ -146,6 +146,17 @@ class BaostockFetcher(BaseFetcher):
         raw_code = stock_code.strip()
         upper = raw_code.upper()
 
+        code = normalize_stock_code(raw_code)
+        # 场外基金代码以 'F' 开头，Baostock 不支持，抛出异常让上层切换其他数据源
+        if raw_code.upper().startswith('F'):
+            raise DataFetchError(f"BaostockFetcher 不支持场外基金 {raw_code}，请使用其他数据源")
+
+        exchange_hint = None
+        if upper.startswith(('SH', 'SS')) or upper.endswith(('.SH', '.SS')):
+            exchange_hint = 'sh'
+        elif upper.startswith('SZ') or upper.endswith('.SZ'):
+            exchange_hint = 'sz'
+
         # HK stocks are not supported by Baostock
         if _is_hk_market(raw_code):
             raise DataFetchError(f"BaostockFetcher 不支持港股 {raw_code}，请使用 AkshareFetcher")
@@ -154,25 +165,19 @@ class BaostockFetcher(BaseFetcher):
         if raw_code.startswith(('sh.', 'sz.')):
             return raw_code.lower()
 
-        exchange_hint = None
-        if upper.startswith(('SH', 'SS')) or upper.endswith(('.SH', '.SS')):
-            exchange_hint = 'sh'
-        elif upper.startswith('SZ') or upper.endswith('.SZ'):
-            exchange_hint = 'sz'
+
 
         code = normalize_stock_code(raw_code)
-
+# duplicate line removed
         if exchange_hint in ('sh', 'sz') and code.isdigit() and len(code) == 6:
             return f"{exchange_hint}.{code}"
         
-        # ETF: Shanghai ETF (51xx, 52xx, 56xx, 58xx) -> sh; Shenzhen ETF (15xx, 16xx, 18xx) -> sz
         if len(code) == 6:
             if code.startswith(('51', '52', '56', '58')):
                 return f"sh.{code}"
             if code.startswith(('15', '16', '18')):
                 return f"sz.{code}"
 
-        # 根据代码前缀判断市场
         if code.startswith(('600', '601', '603', '605', '688')):
             return f"sh.{code}"
         elif code.startswith(('000', '001', '002', '003', '300', '301')):

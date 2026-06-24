@@ -17,6 +17,7 @@ from src.services.stock_index_remote_service import (
 logger = logging.getLogger(__name__)
 
 _STOCK_INDEX_FILENAME = "stocks.index.json"
+_FUND_INDEX_FILENAME = "funds.index.json"
 _STOCK_INDEX_CACHE: Dict[str, str] | None = None
 _STOCK_CODE_LOOKUP_CACHE: Dict[str, str] | None = None
 _REMOTE_INDEX_VALIDITY_CACHE: tuple[Path, float, int, bool] | None = None
@@ -136,19 +137,24 @@ def _build_stock_code_lookup(raw_items: list) -> Dict[str, str]:
         display_code = str(item[1] or "").strip()
         if not canonical_code:
             continue
-        if not _is_jp_kr_index_code(canonical_code):
-            continue
+        
+        # We always record exact matches for any indexed code.
+        # Filtering was previously restricted to JP/KR codes here, which broke
+        # resolution for A-shares and funds.
         if len(item) > 8 and item[8] is False:
             continue
 
         _add_code_lookup(exact_lookup, canonical_code, canonical_code)
         _add_code_lookup(exact_lookup, display_code, canonical_code)
 
-        canonical_upper = canonical_code.upper()
-        if "." in canonical_upper:
-            base, suffix = canonical_upper.rsplit(".", 1)
-            if suffix in {"T", "KS", "KQ"} and base.isdigit():
-                _add_code_lookup(suffix_base_lookup, base, canonical_code)
+        # JP/KR suffix-base lookup (e.g. 005930 -> 005930.KS) is still restricted
+        # to codes that look like JP/KR index entries.
+        if _is_jp_kr_index_code(canonical_code):
+            canonical_upper = canonical_code.upper()
+            if "." in canonical_upper:
+                base, suffix = canonical_upper.rsplit(".", 1)
+                if suffix in {"T", "KS", "KQ"} and base.isdigit():
+                    _add_code_lookup(suffix_base_lookup, base, canonical_code)
 
     result: Dict[str, str] = {}
     for lookup in (exact_lookup, suffix_base_lookup):
@@ -241,8 +247,18 @@ def find_existing_stock_index_path(
     return None
 
 
+def get_stock_index_candidate_dirs() -> tuple[Path, ...]:
+    """Return the supported directories for the generated stock indexes."""
+    repo_root = Path(__file__).resolve().parents[2]
+    return (
+        get_remote_stock_index_cache_path().parent,
+        repo_root / "apps" / "dsa-web" / "public",
+        repo_root / "static",
+    )
+
+
 def get_stock_name_index_map() -> Dict[str, str]:
-    """Lazily load and cache the generated stock-name index."""
+    """Lazily load and cache generated stock-name lookup entries."""
     global _STOCK_INDEX_CACHE
 
     if _STOCK_INDEX_CACHE is not None:
@@ -252,23 +268,32 @@ def get_stock_name_index_map() -> Dict[str, str]:
         if _STOCK_INDEX_CACHE is not None:
             return _STOCK_INDEX_CACHE
 
-        remote_path = get_remote_stock_index_cache_path()
-        for index_path in _get_fresh_stock_index_candidates(get_stock_index_candidate_paths(), remote_path):
-            try:
-                if _same_path(index_path, remote_path):
-                    _STOCK_INDEX_CACHE = _load_remote_stock_index_file(index_path)
-                else:
-                    _STOCK_INDEX_CACHE = _load_stock_index_file(index_path)
-                logger.debug(
-                    "[股票名称] 已加载前端股票索引映射: %s (%d 条)",
-                    index_path,
-                    len(_STOCK_INDEX_CACHE),
-                )
-                return _STOCK_INDEX_CACHE
-            except (OSError, TypeError, ValueError) as exc:
-                logger.debug("[股票名称] 读取股票索引失败 %s: %s", index_path, exc)
+        merged_map: Dict[str, str] = {}
+        dirs = get_stock_index_candidate_dirs()
+        filenames = [_STOCK_INDEX_FILENAME, _FUND_INDEX_FILENAME]
+        
+        # Try directories in order of priority
+        for d in dirs:
+            found_any = False
+            for filename in filenames:
+                index_path = d / filename
+                if not index_path.is_file():
+                    continue
+                
+                try:
+                    # Reuse existing loading logic
+                    file_map = _load_stock_index_file(index_path)
+                    merged_map.update(file_map)
+                    found_any = True
+                    logger.debug("[股票名称] 已加载索引文件: %s (%d 条)", index_path, len(file_map))
+                except (OSError, TypeError, ValueError) as exc:
+                    logger.debug("[股票名称] 读取索引失败 %s: %s", index_path, exc)
+            
+            # If we found at least one index file in this directory, consider it the "active" source
+            if found_any:
+                break
 
-        _STOCK_INDEX_CACHE = {}
+        _STOCK_INDEX_CACHE = merged_map
         return _STOCK_INDEX_CACHE
 
 
@@ -313,16 +338,27 @@ def get_stock_code_index_map() -> Dict[str, str]:
             return _STOCK_CODE_LOOKUP_CACHE
 
         merged_lookup: Dict[str, str] = {}
-        remote_path = get_remote_stock_index_cache_path()
-        for index_path in _get_fresh_stock_index_candidates(get_stock_index_candidate_paths(), remote_path):
-            try:
-                raw_items = _load_stock_index_payload(index_path)
-                if _same_path(index_path, remote_path):
-                    validate_stock_index_payload(raw_items)
-                for key, value in _build_stock_code_lookup(raw_items).items():
-                    merged_lookup.setdefault(key, value)
-            except (OSError, TypeError, ValueError) as exc:
-                logger.debug("[鑲＄エ绱㈠紩] 瑙ｆ瀽浠ｇ爜绱㈠紩澶辫触 %s: %s", index_path, exc)
+        dirs = get_stock_index_candidate_dirs()
+        filenames = [_STOCK_INDEX_FILENAME, _FUND_INDEX_FILENAME]
+
+        for d in dirs:
+            found_any = False
+            for filename in filenames:
+                index_path = d / filename
+                if not index_path.is_file():
+                    continue
+
+                try:
+                    raw_items = _load_stock_index_payload(index_path)
+                    file_lookup = _build_stock_code_lookup(raw_items)
+                    merged_lookup.update(file_lookup)
+                    found_any = True
+                    logger.debug("[股票索引] 已加载代码索引文件: %s (%d 条)", index_path, len(file_lookup))
+                except (OSError, TypeError, ValueError) as exc:
+                    logger.debug("[股票索引] 解析代码索引失败 %s: %s", index_path, exc)
+            
+            if found_any:
+                break
 
         _STOCK_CODE_LOOKUP_CACHE = merged_lookup
         return _STOCK_CODE_LOOKUP_CACHE
@@ -333,17 +369,29 @@ def _resolve_index_stock_code_uncached(query: str) -> str | None:
     if not code:
         return None
 
-    remote_path = get_remote_stock_index_cache_path()
-    for index_path in _get_fresh_stock_index_candidates(get_stock_index_candidate_paths(), remote_path):
-        try:
-            raw_items = _load_stock_index_payload(index_path)
-            if _same_path(index_path, remote_path):
-                validate_stock_index_payload(raw_items)
-            resolved = _build_stock_code_lookup(raw_items).get(code)
-            if resolved:
-                return resolved
-        except (OSError, TypeError, ValueError) as exc:
-            logger.debug("[股票索引] 解析代码索引失败 %s: %s", index_path, exc)
+    dirs = get_stock_index_candidate_dirs()
+    filenames = [_STOCK_INDEX_FILENAME, _FUND_INDEX_FILENAME]
+
+    for d in dirs:
+        found_any = False
+        for filename in filenames:
+            index_path = d / filename
+            if not index_path.is_file():
+                continue
+
+            try:
+                raw_items = _load_stock_index_payload(index_path)
+                resolved = _build_stock_code_lookup(raw_items).get(code)
+                if resolved:
+                    return resolved
+                found_any = True
+            except (OSError, TypeError, ValueError) as exc:
+                logger.debug("[股票索引] 解析代码索引失败 %s: %s", index_path, exc)
+        
+        if found_any:
+            # If we reached here, it means we searched all index files in this directory 
+            # and didn't find the code. Since directories are prioritized, we stop here.
+            break
 
     return None
 

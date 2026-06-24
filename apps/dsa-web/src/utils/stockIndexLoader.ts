@@ -24,23 +24,47 @@ export interface IndexLoadResult {
  * @returns Index load result
  */
 export async function loadStockIndex(): Promise<IndexLoadResult> {
-  try {
-    // Add time parameter to bypass cache (in case the backend doesn't handle ETag/Cache-Control)
-    const response = await fetch(`/stocks.index.json?_t=${Math.floor(Date.now() / 3600000)}`);
+  const timestamp = Math.floor(Date.now() / 3600000);
+  const files = [
+    `/stocks.index.json?_t=${timestamp}`,
+    `/funds.index.json?_t=${timestamp}`,
+  ];
 
-    if (!response.ok) {
-      throw new Error(`Failed to load index: ${response.status} ${response.statusText}`);
+  try {
+    const responses = await Promise.all(
+      files.map(file => fetch(file).then(res => {
+        if (!res.ok) {
+          // If a file is missing, we log it but don't fail the whole load yet
+          console.warn(`[StockIndexLoader] Failed to load ${file}: ${res.status}`);
+          return null;
+        }
+        return res.json();
+      }))
+    );
+
+    const allItems: StockIndexItem[] = [];
+    let hasError = false;
+
+    for (const data of responses) {
+      if (!data) {
+        hasError = true;
+        continue;
+      }
+
+      // Uncompress format (if array format)
+      const items = isCompressedFormat(data)
+        ? unpackTuples(data as StockIndexTuple[])
+        : data as StockIndexItem[];
+      
+      allItems.push(...items);
     }
 
-    const data: StockIndexData = await response.json();
-
-    // Uncompress format (if array format)
-    const items = isCompressedFormat(data)
-      ? unpackTuples(data as StockIndexTuple[])
-      : data as StockIndexItem[];
+    if (allItems.length === 0 && hasError) {
+      throw new Error("Failed to load any index files");
+    }
 
     return {
-      data: items,
+      data: allItems,
       loaded: true,
       fallback: false,
     };

@@ -63,47 +63,52 @@ const mockSuggestions: StockSuggestion[] = [
     displayCode: "600519",
     nameZh: "贵州茅台",
     market: "CN",
+    assetType: "stock",
     matchType: "exact" as const,
     matchField: "code" as const,
     score: 100,
   },
 ];
 
-const hkSuggestion = {
+const hkSuggestion: StockSuggestion = {
   canonicalCode: "00700.HK",
   displayCode: "00700",
   nameZh: "腾讯控股",
   market: "HK" as const,
+  assetType: "stock",
   matchType: "exact" as const,
   matchField: "code" as const,
   score: 100,
 };
 
-const bseSuggestion = {
+const bseSuggestion: StockSuggestion = {
   canonicalCode: "920493.BJ",
   displayCode: "920493",
   nameZh: "示例北交所股票",
   market: "BSE" as const,
+  assetType: "stock",
   matchType: "exact" as const,
   matchField: "code" as const,
   score: 100,
 };
 
-const krSuggestion = {
+const krSuggestion: StockSuggestion = {
   canonicalCode: "000660.KS",
   displayCode: "000660.KS",
   nameZh: "SK Hynix",
   market: "KR" as const,
+  assetType: "stock",
   matchType: "contains" as const,
   matchField: "code" as const,
   score: 60,
 };
 
-const jpSuggestion = {
+const jpSuggestion: StockSuggestion = {
   canonicalCode: "7203.T",
   displayCode: "7203.T",
-  nameZh: "ソニーグループ",
+  nameZh: "トヨタ自動車",
   market: "JP" as const,
+  assetType: "stock",
   matchType: "contains" as const,
   matchField: "code" as const,
   score: 60,
@@ -581,6 +586,7 @@ describe('StockAutocomplete', () => {
             displayCode: 'TEST',
             nameZh: '测试市场',
             market: 'OTC' as never,
+            assetType: 'stock',
             matchType: 'exact' as const,
             matchField: 'code' as const,
             score: 100,

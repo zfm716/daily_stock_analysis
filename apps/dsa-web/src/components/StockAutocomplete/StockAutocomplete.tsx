@@ -10,8 +10,9 @@ import type { KeyboardEvent } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useStockIndex } from '../../hooks/useStockIndex';
-import { useAutocomplete } from '../../hooks/useAutocomplete';
+import { useAutocomplete, type AssetFilter } from '../../hooks/useAutocomplete';
 import { SuggestionsList } from './SuggestionsList';
+import { StockChipRow } from './StockChipRow';
 import { cn } from '../../utils/cn';
 
 const AUTOCOMPLETE_INPUT_CLASS =
@@ -100,6 +101,7 @@ function StockAutocompleteInner({
   className,
 }: StockAutocompleteProps) {
   const { index, loading, fallback } = useStockIndex();
+  const [assetFilter, setAssetFilter] = useState<AssetFilter>('all');
   const {
     // query,
     setQuery,
@@ -115,7 +117,7 @@ function StockAutocompleteInner({
     setIsComposing,
     runtimeFallback,
     error: autocompleteError,
-  } = useAutocomplete(index);
+  } = useAutocomplete(index, { assetFilter });
 
   const inputRef = useRef<HTMLInputElement>(null);
   const prevValueRef = useRef(value);
@@ -222,58 +224,69 @@ function StockAutocompleteInner({
   };
 
   // Fallback mode: use normal input
-  if (fallback || loading || runtimeFallback) {
-    return (
-      <FallbackInput
-        value={value}
-        onChange={onChange}
-        onSubmit={onSubmit}
-        disabled={disabled}
-        placeholder={placeholder}
-        className={className}
-      />
-    );
-  }
+  const showFallback = fallback || loading || runtimeFallback;
 
   return (
-    <div className="relative stock-autocomplete">
-      <input
-        ref={inputRef}
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={handleKeyDown}
-        onCompositionStart={handleCompositionStart}
-        onCompositionEnd={handleCompositionEnd}
-        onFocus={() => {
-          if (isOpen) {
-            updateDropdownPosition();
-          }
-        }}
-        onBlur={handleBlur}
-        placeholder={placeholder}
-        disabled={disabled}
-        className={cn(
-          AUTOCOMPLETE_INPUT_CLASS,
-          isOpen && "rounded-b-none",
-          className
+    <div className="relative stock-autocomplete flex flex-col gap-1.5">
+      <div className="relative">
+        {showFallback ? (
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !disabled && value) {
+                onSubmit(value);
+              }
+            }}
+            placeholder={placeholder}
+            disabled={disabled}
+            className={cn(AUTOCOMPLETE_INPUT_CLASS, className)}
+            data-autocomplete-mode="fallback"
+          />
+        ) : (
+          <input
+            ref={inputRef}
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onCompositionStart={handleCompositionStart}
+            onCompositionEnd={handleCompositionEnd}
+            onFocus={() => {
+              if (isOpen) {
+                updateDropdownPosition();
+              }
+            }}
+            onBlur={handleBlur}
+            placeholder={placeholder}
+            disabled={disabled}
+            className={cn(
+              AUTOCOMPLETE_INPUT_CLASS,
+              isOpen && "rounded-b-none",
+              className
+            )}
+            aria-autocomplete="none"
+            role="combobox"
+            aria-expanded={isOpen}
+            aria-haspopup="listbox"
+            aria-controls="suggestions-list"
+          />
         )}
-        aria-autocomplete="none"
-        role="combobox"
-        aria-expanded={isOpen}
-        aria-haspopup="listbox"
-        aria-controls="suggestions-list"
-      />
 
-      {/* Loading indicator */}
-      {loading && (
-        <div className="absolute right-3 top-1/2 -translate-y-1/2">
-          <div className="w-4 h-4 border-2 border-cyan/20 border-t-cyan rounded-full animate-spin" />
-        </div>
-      )}
+        {/* Loading indicator */}
+        {loading && (
+          <div className="absolute right-3 top-1/2 -translate-y-1/2">
+            <div className="w-4 h-4 border-2 border-cyan/20 border-t-cyan rounded-full animate-spin" />
+          </div>
+        )}
+      </div>
+
+      {/* Asset type filter chips */}
+      <StockChipRow value={assetFilter} onChange={setAssetFilter} />
 
       {/* Suggestion dropdown list */}
-      {isOpen && dropdownStyle && createPortal(
+      {!showFallback && isOpen && dropdownStyle && createPortal(
         <SuggestionsList
           suggestions={suggestions}
           highlightedIndex={highlightedIndex}

@@ -44,7 +44,11 @@ from tenacity import (
 
 from src.patches.eastmoney_patch import eastmoney_patch
 from src.config import get_config
-from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS, is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code
+from .base import (
+    BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS, 
+    is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code,
+    _is_f_fund_code  # 引入场外基金判断函数
+)
 from .realtime_types import (
     UnifiedRealtimeQuote, ChipDistribution, RealtimeSource,
     get_realtime_circuit_breaker, get_chip_circuit_breaker,
@@ -386,6 +390,7 @@ class AkshareFetcher(BaseFetcher):
     
     name = "AkshareFetcher"
     priority = int(os.getenv("AKSHARE_PRIORITY", "1"))
+    handles_fund_codes = True  # 支持场外基金 (F前缀)
     
     def __init__(self, sleep_min: float = 2.0, sleep_max: float = 5.0):
         """
@@ -472,10 +477,94 @@ class AkshareFetcher(BaseFetcher):
             )
         elif _is_hk_code(stock_code):
             return self._fetch_hk_data(stock_code, start_date, end_date)
+        elif _is_f_fund_code(stock_code):
+            return self._fetch_open_fund_data(stock_code, start_date, end_date)
         elif _is_etf_code(stock_code):
             return self._fetch_etf_data(stock_code, start_date, end_date)
         else:
             return self._fetch_stock_data(stock_code, start_date, end_date)
+    
+    def _fetch_open_fund_data(self, stock_code: str, start_date: str = None, end_date: str = None, days: int = None) -> pd.DataFrame:
+        """
+        获取场外开放式基金历史数据（单位净值走势）
+        
+        数据来源：ak.fund_open_fund_info_em()
+        
+        Args:
+            stock_code: 基金代码（带 F 前缀），如 'F002611'
+            start_date: 开始日期，格式 'YYYY-MM-DD'
+            end_date: 结束日期，格式 'YYYY-MM-DD'
+            days: 如果指定，则忽略 start_date/end_date，返回最近 N 天的数据
+            
+        Returns:
+            基金历史数据 DataFrame
+        """
+        import akshare as ak
+        import datetime
+        
+        # 剥离 F 前缀获取纯 6 位代码
+        pure_code = stock_code[1:] if stock_code.upper().startswith('F') else stock_code
+        
+        # 确定日期范围
+        if days:
+            end_dt = datetime.date.today()
+            start_dt = end_dt - datetime.timedelta(days=days)
+            start_date = start_dt.strftime('%Y-%m-%d')
+            end_date = end_dt.strftime('%Y-%m-%d')
+        
+        # 防封禁策略
+        self._set_random_user_agent()
+        self._enforce_rate_limit()
+        
+        logger.info(f"[API调用] ak.fund_open_fund_info_em(symbol={pure_code}, indicator='单位净值走势')")
+        
+        try:
+            import time as _time
+            api_start = _time.time()
+            
+            # 调用 akshare 获取基金净值数据
+            df = ak.fund_open_fund_info_em(symbol=pure_code, indicator="单位净值走势")
+            
+            api_elapsed = _time.time() - api_start
+            
+            if df is not None and not df.empty:
+                logger.info(f"[API返回] ak.fund_open_fund_info_em 成功: {len(df)} 行, 耗时 {api_elapsed:.2f}s")
+                
+                # 标准化列名：净值日期 -> 日期, 单位净值 -> 收盘
+                df = df.rename(columns={'净值日期': '日期', '单位净值': '收盘'})
+                
+                # 转换日期格式以便过滤
+                df['日期'] = pd.to_datetime(df['日期'])
+                
+                if start_date and end_date:
+                    start_dt = pd.to_datetime(start_date)
+                    end_dt = pd.to_datetime(end_date)
+                    # 按范围过滤
+                    mask = (df['日期'] >= start_dt) & (df['日期'] <= end_dt)
+                    df = df.loc[mask]
+                
+                # 填充缺少的列（开盘/最高/最低 统一用收盘价代替，成交量/成交额 设为 0）
+                df['开盘'] = df['收盘']
+                df['最高'] = df['收盘']
+                df['最低'] = df['收盘']
+                df['成交量'] = 0
+                df['成交额'] = 0
+                
+                # 计算涨跌幅
+                df = df.sort_values('日期')
+                df['涨跌幅'] = df['收盘'].pct_change() * 100
+                df.fillna(0, inplace=True)
+                
+                return df
+            else:
+                logger.warning(f"[API返回] ak.fund_open_fund_info_em 返回空数据")
+                return pd.DataFrame()
+                
+        except Exception as e:
+            error_msg = str(e).lower()
+            if any(keyword in error_msg for keyword in ['banned', 'blocked', '频率', 'rate', '限制']):
+                raise RateLimitError(f"Akshare(Fund) 可能被限流: {e}") from e
+            raise DataFetchError(f"Akshare 获取场外基金数据失败: {e}") from e
     
     def _fetch_stock_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
@@ -902,9 +991,120 @@ class AkshareFetcher(BaseFetcher):
         keep_cols = ['code'] + STANDARD_COLUMNS
         existing_cols = [col for col in keep_cols if col in df.columns]
         df = df[existing_cols]
-        
+
         return df
-    
+
+    # Class-level cache for the full 天天基金网 fund list, populated lazily on
+    # the first F-prefixed fund name lookup. Reused across AkshareFetcher
+    # instances and across the process lifetime; tests can reset via
+    # ``AkshareFetcher._fund_name_em_cache = None``.
+    _fund_name_em_cache: Optional[pd.DataFrame] = None
+
+    # Marker consumed by ``DataFetcherManager.get_stock_name`` to decide
+    # which fetchers should be consulted for F-prefixed off-exchange fund
+    # codes. Only fetchers that opt in get called for F codes; this prevents
+    # stock-only fetchers from returning 东方精工 when asked for F002611
+    # (the 002611 基金 博时黄金ETF联接C).
+    handles_fund_codes: bool = True
+
+    def fetch_fund_list(self) -> pd.DataFrame:
+        """Fetch the full fund list from Eastmoney (天天基金网)."""
+        if AkshareFetcher._fund_name_em_cache is None:
+            try:
+                import akshare as ak
+                AkshareFetcher._fund_name_em_cache = ak.fund_name_em()
+            except Exception as exc:
+                logger.warning("[AkshareFetcher] 拉取基金全量列表失败: %s", exc)
+                return pd.DataFrame()
+        return AkshareFetcher._fund_name_em_cache
+
+    def fetch_stock_list(self) -> pd.DataFrame:
+        """Fetch the full A-share stock list from Eastmoney."""
+        try:
+            import akshare as ak
+            return ak.stock_zh_a_spot_em()
+        except Exception as exc:
+            logger.warning("[AkshareFetcher] 拉取A股全量列表失败: %s", exc)
+            return pd.DataFrame()
+
+    def get_stock_name(self, stock_code: str) -> Optional[str]:
+        """Resolve Chinese short name for F-prefixed off-exchange fund codes.
+
+        Non-F codes (A-shares, ETFs, HK/US) intentionally return ``None`` so the
+        ``DataFetcherManager.get_stock_name`` chain continues to other fetchers.
+
+        Resolution order:
+        1. Cached ``ak.fund_name_em()`` full list (~27k funds, 4s initial load).
+        2. ``ak.fund_individual_basic_info_xq(symbol=code)`` per-fund fallback.
+        3. Any upstream failure degrades to ``None`` rather than raising.
+        """
+        raw = (stock_code or "").strip()
+        if not raw.upper().startswith("F"):
+            return None
+        # normalize_stock_code (post-fix) for F-prefixed codes returns the original F string.
+        normalized = normalize_stock_code(raw)
+        if not normalized:
+            return None
+        
+        # 剥离 F 前缀进行基础逻辑校验
+        pure_code = normalized[1:] if normalized.upper().startswith('F') else normalized
+        if not pure_code.isdigit():
+            return None
+
+        name = self._lookup_fund_name_in_full_list(pure_code)
+        if name:
+            return name
+        return self._lookup_fund_name_in_xueqiu(normalized)
+
+    def _lookup_fund_name_in_full_list(self, code: str) -> Optional[str]:
+        if AkshareFetcher._fund_name_em_cache is None:
+            try:
+                import akshare as ak  # local import: keep heavy module out of import-time
+                AkshareFetcher._fund_name_em_cache = ak.fund_name_em()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AkshareFetcher] 拉取基金全量列表失败: %s", exc)
+                return None
+        df = AkshareFetcher._fund_name_em_cache
+        if df is None or df.empty:
+            return None
+        code_col = df.columns[0]
+        name_col = "基金简称" if "基金简称" in df.columns else df.columns[2]
+        try:
+            hit = df[df[code_col].astype(str).str.zfill(6) == code.zfill(6)]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AkshareFetcher] 解析基金全量列表失败: %s", exc)
+            return None
+        if hit.empty:
+            return None
+        value = str(hit.iloc[0][name_col]).strip()
+        return value or None
+
+    def _lookup_fund_name_in_xueqiu(self, code: str) -> Optional[str]:
+        try:
+            import akshare as ak
+            df = ak.fund_individual_basic_info_xq(symbol=code, timeout=10)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AkshareFetcher] 雪球单只基金查询失败: %s", exc)
+            return None
+        if df is None or df.empty:
+            return None
+        # Prefer the short name over the full official name.
+        for key in ("基金简称", "基金名称"):
+            try:
+                mask = df["item"].astype(str).str.contains(key, na=False)
+            except (KeyError, TypeError):
+                break
+            if mask.any():
+                value = str(df[mask].iloc[0]["value"]).strip()
+                if value:
+                    return value
+        # Last resort: first non-empty value column.
+        for _, row in df.iterrows():
+            v = str(row.get("value", "")).strip()
+            if v:
+                return v
+        return None
+
     def get_realtime_quote(self, stock_code: str, source: str = "em") -> Optional[UnifiedRealtimeQuote]:
         """
         获取实时行情数据（支持多数据源）
@@ -930,6 +1130,8 @@ class AkshareFetcher(BaseFetcher):
             return None
         elif _is_hk_code(stock_code):
             return self._get_hk_realtime_quote(stock_code)
+        elif _is_f_fund_code(stock_code):
+            return self._get_open_fund_realtime_quote(stock_code)
         elif _is_etf_code(stock_code):
             source_key = "akshare_etf"
             if not circuit_breaker.is_available(source_key):
@@ -949,6 +1151,41 @@ class AkshareFetcher(BaseFetcher):
             else:
                 return self._get_stock_realtime_quote_em(stock_code)
     
+    def _get_open_fund_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """
+        获取场外开放式基金的“实时”行情（实际上是最近一个交易日的净值）
+        """
+        # 复用历史数据抓取逻辑，只取最后一天
+        try:
+            # 默认取最近 10 天以确保能拿到最后一条数据
+            df = self._fetch_open_fund_data(stock_code, days=10)
+            if df is None or df.empty:
+                return None
+                
+            latest = df.iloc[-1]
+            name = self.get_stock_name(stock_code) or stock_code
+            
+            return UnifiedRealtimeQuote(
+                code=stock_code,
+                name=name,
+                price=float(latest['收盘']),
+            change_pct=float(latest['涨跌幅']),
+            change_amount=0.0,  # 净值数据通常不计绝对涨跌额
+            volume=0,
+            amount=0.0,
+            turnover_rate=0.0,
+            amplitude=0.0,
+            high=float(latest['最高']),
+            low=float(latest['最低']),
+            open_price=float(latest['开盘']),
+                prev_close=0.0, # 无法简单获得
+                source=RealtimeSource.AKSHARE,
+                timestamp=latest['date'].timestamp() if hasattr(latest['date'], 'timestamp') else time.time()
+            )
+        except Exception as e:
+            logger.warning(f"[AkshareFetcher] 获取场外基金实时行情失败 {stock_code}: {e}")
+            return None
+
     def _get_stock_realtime_quote_em(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
         获取普通 A 股实时行情数据（东方财富数据源）

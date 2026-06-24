@@ -66,3 +66,16 @@ export const PORTFOLIO_TEXT = {
 export const PORTFOLIO_SIDE_LABELS: Record<UiLanguage, Record<PortfolioSide, string>> = { zh: { buy: '买入', sell: '卖出' }, en: { buy: 'Buy', sell: 'Sell' } };
 export const PORTFOLIO_CASH_DIRECTION_LABELS: Record<UiLanguage, Record<PortfolioCashDirection, string>> = { zh: { in: '流入', out: '流出' }, en: { in: 'Inflow', out: 'Outflow' } };
 export const PORTFOLIO_CORPORATE_ACTION_LABELS: Record<UiLanguage, Record<PortfolioCorporateActionType, string>> = { zh: { cash_dividend: '现金分红', split_adjustment: '拆并股调整' }, en: { cash_dividend: 'Cash dividend', split_adjustment: 'Split adjustment' } };
+
+export const STOCK_AUTOCOMPLETE_TEXT = {
+  zh: {
+    assetFilterAll: '全部',
+    assetFilterStock: '股票',
+    assetFilterFund: '基金',
+  },
+  en: {
+    assetFilterAll: 'All',
+    assetFilterStock: 'Stocks',
+    assetFilterFund: 'Funds',
+  },
+} as const;
